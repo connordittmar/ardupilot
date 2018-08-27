@@ -5,7 +5,6 @@ from __future__ import print_function
 import math
 import os
 import shutil
-import sys
 import time
 
 import pexpect
@@ -14,12 +13,13 @@ from pymavlink import mavutil
 from pysim import util
 
 from common import AutoTest
-from common import NotAchievedException, AutoTestTimeoutException
+from common import NotAchievedException, AutoTestTimeoutException, PreconditionFailedException
 
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
 HOME = mavutil.location(-35.362938, 149.165085, 584, 270)
 AVCHOME = mavutil.location(40.072842, -105.230575, 1586, 0)
+
 
 # Flight mode switch positions are set-up in arducopter.param to be
 #   switch 1 = Circle
@@ -142,12 +142,12 @@ class AutoTestCopter(AutoTest):
         self.progress("Ran command")
         self.wait_for_alt(alt_min)
 
-    def takeoff(self, alt_min=30, takeoff_throttle=1700, arm=False):
+    def takeoff(self, alt_min=30, takeoff_throttle=1700):
         """Takeoff get to 30m altitude."""
         self.progress("TAKEOFF")
         self.mavproxy.send('switch 6\n')  # stabilize mode
         self.wait_mode('STABILIZE')
-        if arm:
+        if not self.armed():
             self.progress("Waiting reading for arm")
             self.wait_ready_to_arm()
             self.set_rc(3, 1000)
@@ -158,7 +158,7 @@ class AutoTestCopter(AutoTest):
         self.progress("TAKEOFF COMPLETE")
 
     def wait_for_alt(self, alt_min=30):
-        '''wait for altitude to be reached'''
+        """Wait for altitude to be reached."""
         m = self.mav.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
         alt = m.relative_alt / 1000.0 # mm -> m
         if alt < alt_min:
@@ -696,7 +696,6 @@ class AutoTestCopter(AutoTest):
 
         # disable gps glitch
         if glitch_current != -1:
-            glitch_current = -1
             self.set_parameter("SIM_GPS_GLITCH_X", 0)
             self.set_parameter("SIM_GPS_GLITCH_Y", 0)
         if self.use_map:
@@ -1043,9 +1042,9 @@ class AutoTestCopter(AutoTest):
 
         # we only expect an octocopter to survive ATM:
         servo_counts = {
-#            2: 6, # hexa
-            3: 8, # octa
-#            5: 6, # Y6
+            # 2: 6, # hexa
+            3: 8,  # octa
+            # 5: 6, # Y6
         }
         frame_class = int(self.get_parameter("FRAME_CLASS"))
         if frame_class not in servo_counts:
@@ -1111,7 +1110,7 @@ class AutoTestCopter(AutoTest):
                     else:
                         state = "OK"
 
-                    if failed and i==fail_servo:
+                    if failed and i == fail_servo:
                         state += " (failed)"
 
                     self.progress("servo %u [pwm=%u] [%s]" % (i+1, pwm, state))
@@ -1164,11 +1163,10 @@ class AutoTestCopter(AutoTest):
         self.set_rc(3, 1500)
 
     def fly_vision_position(self):
-        '''disable GPS navigation, enable Vicon input'''
+        """Disable GPS navigation, enable Vicon input."""
         # scribble down a location we can set origin to:
 
         self.progress("Waiting for location")
-        start = self.mav.location()
         self.mavproxy.send('switch 6\n')  # stabilize mode
         self.mav.wait_heartbeat()
         self.wait_mode('STABILIZE')
@@ -1178,7 +1176,7 @@ class AutoTestCopter(AutoTest):
         old_pos = self.mav.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
         print("old_pos=%s" % str(old_pos))
 
-        self.context_push();
+        self.context_push()
 
         ex = None
         try:
@@ -1198,23 +1196,23 @@ class AutoTestCopter(AutoTest):
             while True:
                 gpi = self.mav.recv_match(type='GLOBAL_POSITION_INT',
                                           blocking=True)
-#                self.progress("gpi=%s" % str(gpi))
+                # self.progress("gpi=%s" % str(gpi))
                 if gpi.lat != 0:
                     break
 
                 if self.get_sim_time() - tstart > 10:
                     raise AutoTestTimeoutException()
 
-            self.takeoff(arm=True)
+            self.takeoff()
             self.set_rc(1, 1600)
             tstart = self.get_sim_time()
             while True:
                 vicon_pos = self.mav.recv_match(type='VICON_POSITION_ESTIMATE',
                                                 blocking=True)
-#                print("vpe=%s" % str(vicon_pos))
-                gpi = self.mav.recv_match(type='GLOBAL_POSITION_INT',
-                                          blocking=True)
-#                self.progress("gpi=%s" % str(gpi))
+                # print("vpe=%s" % str(vicon_pos))
+                self.mav.recv_match(type='GLOBAL_POSITION_INT',
+                                    blocking=True)
+                # self.progress("gpi=%s" % str(gpi))
                 if vicon_pos.x > 40:
                     break
 
@@ -1230,12 +1228,12 @@ class AutoTestCopter(AutoTest):
             while True:
                 if self.get_sim_time() - tstart > 200:
                     raise NotAchievedException()
-                gpi = self.mav.recv_match(type='GLOBAL_POSITION_INT',
-                                          blocking=True)
-#                print("gpi=%s" % str(gpi))
-                ss = self.mav.recv_match(type='SIMSTATE',
-                                         blocking=True)
-#                print("ss=%s" % str(ss))
+                self.mav.recv_match(type='GLOBAL_POSITION_INT',
+                                    blocking=True)
+                # print("gpi=%s" % str(gpi))
+                self.mav.recv_match(type='SIMSTATE',
+                                    blocking=True)
+                # print("ss=%s" % str(ss))
                 # wait for RTL disarm:
                 if not self.armed():
                     break
@@ -1244,7 +1242,7 @@ class AutoTestCopter(AutoTest):
             self.progress("Exception caught")
             ex = e
 
-        self.context_pop();
+        self.context_pop()
         self.set_rc(3, 1000)
         self.reboot_sitl()
 
@@ -1252,9 +1250,9 @@ class AutoTestCopter(AutoTest):
             raise ex
 
     def fly_nav_delay(self):
-        """fly a simple mission that has a delay in it"""
+        """Fly a simple mission that has a delay in it."""
 
-        num_wp = self.load_mission("copter_nav_delay.txt")
+        self.load_mission("copter_nav_delay.txt")
 
         self.mavproxy.send('mode loiter\n')
         self.mav.wait_heartbeat()
@@ -1262,7 +1260,7 @@ class AutoTestCopter(AutoTest):
         self.progress("Waiting reading for arm")
         self.wait_ready_to_arm()
 
-        self.context_push();
+        self.context_push()
 
         ex = None
         try:
@@ -1302,22 +1300,21 @@ class AutoTestCopter(AutoTest):
         if ex is not None:
             raise ex
 
-    def get_system_clock_utc(self, time):
+    def get_system_clock_utc(self, time_seconds):
         # this is a copy of ArduPilot's AP_RTC function!
         # separate time into ms, sec, min, hour and days but all expressed
         # in milliseconds
-        time_ms = time * 1000
-        ms = time_ms % 1000;
-        sec_ms = (time_ms % (60 * 1000)) - ms;
-        min_ms = (time_ms % (60 * 60 * 1000)) - sec_ms - ms;
-        hour_ms = (time_ms % (24 * 60 * 60 * 1000)) - min_ms - sec_ms - ms;
+        time_ms = time_seconds * 1000
+        ms = time_ms % 1000
+        sec_ms = (time_ms % (60 * 1000)) - ms
+        min_ms = (time_ms % (60 * 60 * 1000)) - sec_ms - ms
+        hour_ms = (time_ms % (24 * 60 * 60 * 1000)) - min_ms - sec_ms - ms
 
         # convert times as milliseconds into appropriate units
-        sec = sec_ms / 1000;
-        min = min_ms / (60 * 1000);
-        hour = hour_ms / (60 * 60 * 1000);
-        return (hour, min, sec, 0)
-
+        secs = sec_ms / 1000
+        mins = min_ms / (60 * 1000)
+        hours = hour_ms / (60 * 60 * 1000)
+        return (hours, mins, secs, 0)
 
     def calc_delay(self, seconds):
         # delay-for-seconds has to be long enough that we're at the
@@ -1442,7 +1439,7 @@ class AutoTestCopter(AutoTest):
     def fly_nav_delay_abstime(self):
         """fly a simple mission that has a delay in it"""
 
-        num_wp = self.load_mission("copter_nav_delay.txt")
+        self.load_mission("copter_nav_delay.txt")
 
         self.progress("Starting mission")
 
@@ -1458,7 +1455,7 @@ class AutoTestCopter(AutoTest):
         reset_at_m = self.mav.recv_match(type='SYSTEM_TIME', blocking=True)
         reset_at = reset_at_m.time_unix_usec/1000000
 
-        self.context_push();
+        self.context_push()
 
         ex = None
         try:
@@ -1533,12 +1530,13 @@ class AutoTestCopter(AutoTest):
                     # timeout
                     break
                 m = self.mav.recv_match(type='MISSION_CURRENT', blocking=True)
+                now = self.get_sim_time_cached()
                 self.progress("%s" % str(m))
                 if m.seq > delay_item_seq:
                     if not took_off:
                         took_off = True
                         delta_time = now - reset_at
-                        if abs(delta_time - delay_for_seconds) > 1:
+                        if abs(delta_time - delay_for_seconds) > 2:
                             self.progress("Did not take off on time "
                                           "measured=%f want=%f" %
                                           (delta_time, delay_for_seconds))
@@ -1557,7 +1555,7 @@ class AutoTestCopter(AutoTest):
             raise ex
 
     def test_setting_modes_via_modeswitch(self):
-        self.context_push();
+        self.context_push()
         ex = None
         try:
             fltmode_ch = 5
@@ -1569,7 +1567,7 @@ class AutoTestCopter(AutoTest):
                          ("FLTMODE4", 7, "CIRCLE", 1555),
                          ("FLTMODE5", 1, "ACRO", 1685),
                          ("FLTMODE6", 17, "BRAKE", 1815),
-            ]
+                         ]
             for mode in testmodes:
                 (parm, parm_value, name, pwm) = mode
                 self.set_parameter(parm, parm_value)
@@ -1604,7 +1602,7 @@ class AutoTestCopter(AutoTest):
             raise ex
 
     def test_setting_modes_via_auxswitch(self):
-        self.context_push();
+        self.context_push()
         ex = None
         try:
             fltmode_ch = int(self.get_parameter("FLTMODE_CH"))
@@ -1624,15 +1622,15 @@ class AutoTestCopter(AutoTest):
             self.progress("Exception caught")
             ex = e
 
-        self.context_pop();
+        self.context_pop()
 
         if ex is not None:
             raise ex
 
     def fly_guided_change_submode(self):
-        '''Ensure we can move around in guided after a takeoff command'''
+        """"Ensure we can move around in guided after a takeoff command."""
 
-        self.context_push();
+        self.context_push()
 
         ex = None
         try:
@@ -1650,11 +1648,11 @@ class AutoTestCopter(AutoTest):
             startpos = self.mav.recv_match(type='GLOBAL_POSITION_INT',
                                            blocking=True)
 
-            '''yaw through absolute angles using MAV_CMD_CONDITION_YAW'''
+            """yaw through absolute angles using MAV_CMD_CONDITION_YAW"""
             self.guided_achieve_heading(45)
             self.guided_achieve_heading(135)
 
-            '''move the vehicle using set_position_target_global_int'''
+            """move the vehicle using set_position_target_global_int"""
             tstart = self.get_sim_time()
             while True:
                 if self.get_sim_time() - tstart > 200:
@@ -1694,13 +1692,12 @@ class AutoTestCopter(AutoTest):
             self.progress("Exception caught")
             ex = e
 
-        self.context_pop();
+        self.context_pop()
         self.set_rc(3, 1000)
         self.reboot_sitl()
 
         if ex is not None:
             raise ex
-
 
     def autotest(self):
         """Autotest ArduCopter in SITL."""
@@ -1717,7 +1714,6 @@ class AutoTestCopter(AutoTest):
             self.progress("Setting up RC parameters")
             self.set_rc_default()
             self.set_rc(3, 1000)
-
             self.run_test("Fly Nav Delay (takeoff)",
                           self.fly_nav_takeoff_delay_abstime)
 
@@ -1785,7 +1781,7 @@ class AutoTestCopter(AutoTest):
 
             # Takeoff
             self.run_test("Takeoff to test stability patch",
-                          lambda: self.takeoff(10, arm=True))
+                          lambda: self.takeoff(10))
 
             # Stability patch
             self.run_test("Fly stability patch",
@@ -1796,11 +1792,15 @@ class AutoTestCopter(AutoTest):
 
             # Takeoff
             self.run_test("Takeoff to test horizontal fence",
-                          lambda: self.takeoff(10, arm=True))
+                          lambda: self.takeoff(10))
 
             # Fence test
             self.run_test("Test horizontal fence",
                           lambda: self.fly_fence_test(180))
+
+            # Takeoff
+            self.run_test("Takeoff to test Max Alt fence",
+                          lambda: self.takeoff(10))
 
             # Fence test
             self.run_test("Test Max Alt Fence", self.fly_alt_max_fence_test)
@@ -1827,7 +1827,7 @@ class AutoTestCopter(AutoTest):
                           self.fly_gps_glitch_auto_test)
 
             # Takeoff
-            self.run_test("Takeoff to test loiter", lambda: self.takeoff(10, arm=True))
+            self.run_test("Takeoff to test loiter", lambda: self.takeoff(10))
 
             # Loiter for 10 seconds
             self.run_test("Test Loiter for 10 seconds", self.loiter)
@@ -1844,7 +1844,7 @@ class AutoTestCopter(AutoTest):
 
             # Takeoff
             self.run_test("Takeoff to test fly SIMPLE mode",
-                          lambda: self.takeoff(10, arm=True))
+                          lambda: self.takeoff(10))
 
             # Simple mode
             self.run_test("Fly in SIMPLE mode", self.fly_simple)
@@ -1854,7 +1854,7 @@ class AutoTestCopter(AutoTest):
 
             # Takeoff
             self.run_test("Takeoff to test circle in SUPER SIMPLE mode",
-                          lambda: self.takeoff(10, arm=True))
+                          lambda: self.takeoff(10))
 
             # Fly a circle in super simple mode
             self.run_test("Fly a circle in SUPER SIMPLE mode",
@@ -1865,7 +1865,7 @@ class AutoTestCopter(AutoTest):
 
             # Takeoff
             self.run_test("Takeoff to test CIRCLE mode",
-                          lambda: self.takeoff(10, arm=True))
+                          lambda: self.takeoff(10))
 
             # Circle mode
             self.run_test("Fly CIRCLE mode", self.fly_circle)
@@ -1880,7 +1880,7 @@ class AutoTestCopter(AutoTest):
 
             # Takeoff
             self.run_test("Takeoff to test motor failure",
-                          lambda: self.takeoff(10, arm=True))
+                          lambda: self.takeoff(10))
 
             self.run_test("Fly motor failure test",
                           self.fly_motor_fail)
@@ -1903,7 +1903,10 @@ class AutoTestCopter(AutoTest):
             # wait for disarm
             self.mav.motors_disarmed_wait()
 
-            '''vision position''' # expects vehicle to be disarmed
+            # Gripper test
+            self.run_test("Test gripper", self.test_gripper)
+
+            '''vision position'''  # expects vehicle to be disarmed
             self.run_test("Fly Vision Position", self.fly_vision_position)
 
             # Download logs
@@ -1911,7 +1914,7 @@ class AutoTestCopter(AutoTest):
                           lambda: self.log_download(
                               self.buildlogs_path("ArduCopter-log.bin")))
 
-        except pexpect.TIMEOUT as e:
+        except pexpect.TIMEOUT:
             self.progress("Failed with timeout")
             self.fail_list.append("Failed with timeout")
         self.close()
@@ -1956,7 +1959,7 @@ class AutoTestCopter(AutoTest):
                           lambda: self.log_download(
                               self.buildlogs_path("Helicopter-log.bin")))
 
-        except pexpect.TIMEOUT as e:
+        except pexpect.TIMEOUT:
             self.fail_list.append("Failed with timeout")
 
         self.close()

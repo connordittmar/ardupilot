@@ -7,6 +7,7 @@ import shutil
 import sys
 import time
 import pexpect
+import fnmatch
 
 from pymavlink import mavwp, mavutil
 from pysim import util, vehicleinfo
@@ -103,6 +104,7 @@ class Context(object):
     def __init__(self):
         self.parameters = []
 
+
 class AutoTest(ABC):
     """Base abstract class.
     It implements the common function for all vehicle types.
@@ -131,7 +133,7 @@ class AutoTest(ABC):
         return os.getenv("BUILDLOGS", util.reltopdir("../buildlogs"))
 
     def buildlogs_path(self, path):
-        '''return a string representing path in the buildlogs directory'''
+        """Return a string representing path in the buildlogs directory."""
         bits = [self.buildlogs_dirpath()]
         if isinstance(path, list):
             bits.extend(path)
@@ -140,7 +142,7 @@ class AutoTest(ABC):
         return os.path.join(*bits)
 
     def sitl_streamrate(self):
-        '''allow subclasses to override SITL streamrate'''
+        """Allow subclasses to override SITL streamrate."""
         return 10
 
     def autotest_connection_hostport(self):
@@ -155,7 +157,7 @@ class AutoTest(ABC):
         return "tcp:" + self.autotest_connection_hostport()
 
     def mavproxy_options(self):
-        '''returns options to be passed to MAVProxy'''
+        """Returns options to be passed to MAVProxy."""
         ret = ['--sitl=127.0.0.1:5501',
                '--out=' + self.autotest_connection_string_from_mavproxy(),
                '--streamrate=%u' % self.sitl_streamrate()]
@@ -170,8 +172,7 @@ class AutoTest(ABC):
         return self.log_name
 
     def apply_defaultfile_parameters(self):
-        '''apply parameter file'''
-
+        """Apply parameter file."""
         # setup test parameters
         vinfo = vehicleinfo.VehicleInfo()
         if self.params is None:
@@ -192,6 +193,7 @@ class AutoTest(ABC):
         self.mavproxy.expect("Received [0-9]+ parameters")
 
     def reboot_sitl(self):
+        """Reboot SITL instance and wait it to reconnect."""
         self.mavproxy.send("reboot\n")
         self.mavproxy.expect("tilt alignment complete")
         # empty mav to avoid getting old timestamps:
@@ -222,7 +224,7 @@ class AutoTest(ABC):
         self.progress("Reboot complete")
 
     def close(self):
-        '''tidy up after running all tests'''
+        """Tidy up after running all tests."""
         if self.use_map:
             self.mavproxy.send("module unload map\n")
             self.mavproxy.expect("Unloaded module map")
@@ -407,7 +409,7 @@ class AutoTest(ABC):
             self.set_rc(3, 1000)
 
     def armed(self):
-        '''Return true if vehicle is armed and safetyoff'''
+        """Return true if vehicle is armed and safetyoff"""
         return self.mav.motors_armed()
 
     def arm_vehicle(self):
@@ -481,7 +483,23 @@ class AutoTest(ABC):
         self.progress("FAILED TO AUTODISARM")
         return False
 
+    @staticmethod
+    def should_fetch_all_for_parameter_change(param_name):
+        if fnmatch.fnmatch(param_name, "*_ENABLE") or fnmatch.fnmatch(param_name, "*_ENABLED"):
+            return True
+        if param_name in ["ARSPD_TYPE",
+                          "ARSPD2_TYPE",
+                          "BATT2_MONITOR",
+                          "CAN_DRIVER",
+                          "COMPASS_PMOT_EN",
+                          "OSD_TYPE",
+                          "RSSI_TYPE",
+                          "WENC_TYPE"]:
+            return True
+        return False
+
     def set_parameter(self, name, value, add_to_context=True):
+        """Set parameters from vehicle."""
         old_value = self.get_parameter(name, retry=2)
         for i in range(1, 10):
             self.mavproxy.send("param set %s %s\n" % (name, str(value)))
@@ -489,13 +507,16 @@ class AutoTest(ABC):
             if returned_value == float(value):
                 # yes, exactly equal.
                 if add_to_context:
-                    self.context_get().parameters.append( (name, old_value) )
+                    self.context_get().parameters.append((name, old_value))
+                if self.should_fetch_all_for_parameter_change(name.upper()) and value == 1:
+                    self.fetch_parameters()
                 return
             self.progress("Param fetch returned incorrect value (%s) vs (%s)"
                           % (returned_value, value))
         raise ValueError()
 
     def get_parameter(self, name, retry=1, timeout=60):
+        """Get parameters from vehicle."""
         for i in range(0, retry):
             self.mavproxy.send("param fetch %s\n" % name)
             try:
@@ -506,15 +527,17 @@ class AutoTest(ABC):
                     continue
 
     def context_get(self):
+        """Get Saved parameters."""
         return self.contexts[-1]
 
     def context_push(self):
+        """Save a copy of the parameters."""
         self.contexts.append(Context())
 
     def context_pop(self):
+        """Set parameters to origin values in reverse order."""
         dead = self.contexts.pop()
 
-        '''set paramters to origin values in reverse order'''
         dead_parameters = dead.parameters
         dead_parameters.reverse()
         for p in dead_parameters:
@@ -533,6 +556,7 @@ class AutoTest(ABC):
                 p6,
                 p7,
                 want_result=mavutil.mavlink.MAV_RESULT_ACCEPTED):
+        """Send a MAVLink command long."""
         self.mav.mav.command_long_send(1,
                                        1,
                                        command,
@@ -644,7 +668,7 @@ class AutoTest(ABC):
             self.mav.recv_match(condition='RC_CHANNELS.chan1_raw==1500',
                                 blocking=True)
 
-    def reach_distance_manual(self,  distance):
+    def reach_distance_manual(self, distance):
         """Manually direct the vehicle to the target distance from home."""
         if self.mav.mav_type in [mavutil.mavlink.MAV_TYPE_QUADROTOR,
                                  mavutil.mavlink.MAV_TYPE_HELICOPTER,
@@ -697,7 +721,6 @@ class AutoTest(ABC):
 
     def wait_altitude(self, alt_min, alt_max, timeout=30, relative=False):
         """Wait for a given altitude range."""
-        climb_rate = 0
         previous_alt = 0
 
         tstart = self.get_sim_time()
@@ -836,7 +859,7 @@ class AutoTest(ABC):
             self.progress("Distance %.2f meters alt %.1f" % (delta, pos.alt))
             if delta <= accuracy:
                 height_delta = math.fabs(pos.alt - target_altitude)
-                if (height_accuracy != -1 and height_delta > height_accuracy):
+                if height_accuracy != -1 and height_delta > height_accuracy:
                     continue
                 self.progress("Reached location (%.2f meters)" % delta)
                 return True
@@ -912,11 +935,11 @@ class AutoTest(ABC):
         self.mav.wait_heartbeat()
         while self.mav.flightmode != mode:
             if (timeout is not None and
-                self.get_sim_time() > tstart + timeout):
+                    self.get_sim_time() > tstart + timeout):
                 raise WaitModeTimeout()
             self.mav.wait_heartbeat()
-#            self.progress("heartbeat mode %s Want: %s" % (
-#                    self.mav.flightmode, mode))
+        # self.progress("heartbeat mode %s Want: %s" % (
+        # self.mav.flightmode, mode))
         self.progress("Got mode %s" % mode)
 
     def wait_ready_to_arm(self, timeout=None):
@@ -962,6 +985,20 @@ class AutoTest(ABC):
         self.progress("Failed to get EKF.flags=%u" % required_value)
         raise AutoTestTimeoutException()
 
+    def wait_text(self, text, timeout=20, the_function=None):
+        """Wait a specific STATUS_TEXT."""
+        self.progress("Waiting for text : %s" % text.lower())
+        tstart = self.get_sim_time()
+        while self.get_sim_time() < tstart + timeout:
+            if the_function is not None:
+                the_function()
+            m = self.mav.recv_match(type='STATUSTEXT', blocking=True)
+            if text.lower() in m.text.lower():
+                self.progress("Received expected text : %s" % m.text.lower())
+                return True
+        self.progress("Failed to received text : %s" % text.lower())
+        raise AutoTestTimeoutException()
+
     def get_mavlink_connection_going(self):
         # get a mavlink connection going
         connection_string = self.autotest_connection_string_to_mavproxy()
@@ -976,11 +1013,11 @@ class AutoTest(ABC):
         self.mav.message_hooks.append(self.message_hook)
         self.mav.idle_hooks.append(self.idle_hook)
 
-    def run_test(self, desc, function, interact=False):
+    def run_test(self, desc, test_function, interact=False):
         self.start_test(desc)
 
         try:
-            function()
+            test_function()
         except Exception as e:
             self.progress('FAILED: "%s": %s' % (desc, repr(e)))
             self.fail_list.append((desc, e))
@@ -1032,6 +1069,91 @@ class AutoTest(ABC):
             raise NotAchievedException()
         # TODO : add failure test : arming check, wrong mode; Test arming magic; Same for disarm
 
+    def test_gripper(self):
+        self.context_push()
+        self.set_parameter("GRIP_ENABLE", 1)
+        self.fetch_parameters()
+        self.set_parameter("GRIP_GRAB", 2000)
+        self.set_parameter("GRIP_RELEASE", 1000)
+        self.set_parameter("GRIP_TYPE", 1)
+        self.set_parameter("SIM_GRPS_ENABLE", 1)
+        self.set_parameter("SIM_GRPS_PIN", 8)
+        self.set_parameter("SERVO8_FUNCTION", 28)
+        self.set_parameter("SERVO8_MIN", 1000)
+        self.set_parameter("SERVO8_MAX", 2000)
+        self.set_parameter("RC9_OPTION", 19)
+        self.reboot_sitl()
+        self.progress("Waiting reading for arm")
+        self.wait_ready_to_arm()
+        self.progress("Test gripper with RC9_OPTION")
+        self.progress("Releasing load")
+        # non strict string matching because of catching text issue....
+        self.wait_text("Gripper load releas", the_function=lambda: self.set_rc(9, 1000))
+        self.progress("Grabbing load")
+        self.wait_text("Gripper load grabb", the_function=lambda: self.set_rc(9, 2000))
+        self.progress("Releasing load")
+        self.wait_text("Gripper load releas", the_function=lambda: self.set_rc(9, 1000))
+        self.progress("Grabbing load")
+        self.wait_text("Gripper load grabb", the_function=lambda: self.set_rc(9, 2000))
+        self.progress("Test gripper with Mavlink cmd")
+        self.progress("Releasing load")
+        self.wait_text("Gripper load releas",
+                       the_function=lambda: self.mav.mav.command_long_send(1,
+                                                                           1,
+                                                                           mavutil.mavlink.MAV_CMD_DO_GRIPPER,
+                                                                           0,
+                                                                           1,
+                                                                           mavutil.mavlink.GRIPPER_ACTION_RELEASE,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           ))
+        self.progress("Grabbing load")
+        self.wait_text("Gripper load grabb",
+                       the_function=lambda: self.mav.mav.command_long_send(1,
+                                                                           1,
+                                                                           mavutil.mavlink.MAV_CMD_DO_GRIPPER,
+                                                                           0,
+                                                                           1,
+                                                                           mavutil.mavlink.GRIPPER_ACTION_GRAB,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           ))
+        self.progress("Releasing load")
+        self.wait_text("Gripper load releas",
+                       the_function=lambda: self.mav.mav.command_long_send(1,
+                                                                           1,
+                                                                           mavutil.mavlink.MAV_CMD_DO_GRIPPER,
+                                                                           0,
+                                                                           1,
+                                                                           mavutil.mavlink.GRIPPER_ACTION_RELEASE,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           ))
+        self.progress("Grabbing load")
+        self.wait_text("Gripper load grabb",
+                       the_function=lambda: self.mav.mav.command_long_send(1,
+                                                                           1,
+                                                                           mavutil.mavlink.MAV_CMD_DO_GRIPPER,
+                                                                           0,
+                                                                           1,
+                                                                           mavutil.mavlink.GRIPPER_ACTION_GRAB,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           0,
+                                                                           ))
+        self.context_pop()
+        self.reboot_sitl()
     #     # TEST MISSION FILE
     #     # TODO : rework that to work on autotest server
     #     # self.progress("TEST LOADING MISSION")
